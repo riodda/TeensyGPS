@@ -14,6 +14,8 @@
 #include <ArduinoJson.h>
 #include <FlexCAN.h>
 #include <Metro.h>
+#include <SimpleFIFO.h>
+
 
 const String fixmodmask[]={"no fix", "2D", "3D", "3D+DGNSS"};
 /* This sample code demonstrates the normal use of the binary message of 
@@ -57,11 +59,14 @@ boolean file_cutted=false;
 
 double t0,t1,dt=0;
 uint8_t sats,fix;
-const float lat_beacon[4]={45.618967, 2.760700  , 14.958108,    45.533341};
-const float lon_beacon[4]={9.281226,  101.738322, 103.085608,   10.219222};
-//                        0 Monza     1 Sepang   2 Buri ram     3 Via XX Settembre
+const float lat_beacon[7]={45.618967, 2.760720  , 14.958108,    45.533341,          43.251183,      34.738702,    42.157686};
+const float lon_beacon[7]={9.281226,  101.738383, 103.085608,   10.219222,          5.793050,       126.415466,    12.368977};
+//                        0 Monza     1 Sepang   2 Buri ram     3 Via XX Settembre  4 Paul Ricard  5 Yeongam\     6 Vallelunga
 
-const float beacon_distance=9; //radious in m for lap beacon trigger
+
+const float beacon_distance=12// radius in m for lap beacon trigger increase to 12-15 m for non sbas countries
+SimpleFIFO<float,bearing_buffer> Lat_buffer;
+SimpleFIFO<float,bearing_buffer> Long_buffer;
 
 boolean log_en;
 int newlog, rate, can_speed, max_filesize, filesize, log_type, trig, intv;
@@ -120,6 +125,12 @@ void setup()
 //  fls.min_speed = CNF[23];
 //  fls.check_min_speed = CNF[24];
 //  fls.check_max_speed = CNF[25];
+ //intizialize the fifo buffer with 0
+  for (int i=0; i<bearing_buffer; i++)
+  {
+    Lat_buffer.enqueue(0.0);
+    Long_buffer.enqueue(0.0);
+  }
   file_time_cut.interval(btime*1000);
   Serial.println(filesize*1048576);
   Serial.println(newlog);
@@ -218,7 +229,12 @@ void loop()
     Serial.print("UTC time: ");
     UTC_Time = GetUTCTime(gps.venus838data_raw.gps_week, gps.venus838data_raw.timeofweek);
     Serial.println(UTC_Time);
-    course_angle = gps.course_to(gps.venus838data_filter.Longitude, gps.venus838data_filter.Latitude, 0 , 0);          
+    Lat_buffer.enqueue(gps.venus838data_raw.Latitude);
+    Long_buffer.enqueue(gps.venus838data_raw.Longitude);  
+    float temp_lat,temp_lon=0;
+    temp_lat=Lat_buffer.dequeue();
+    temp_lon=Long_buffer.dequeue();    
+    course_angle = gps.course_to(gps.venus838data_raw.Latitude,gps.venus838data_raw.Longitude,temp_lat,temp_lon);           
     sensor_9dof_read();    
     if (beacon_output)
         check_beacon_dist();
