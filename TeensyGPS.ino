@@ -62,6 +62,7 @@ const float lon_beacon[4]={9.281226,  101.738322, 103.085608,   10.219222};
 //                        0 Monza     1 Sepang   2 Buri ram     3 Via XX Settembre
 
 const float beacon_distance=9; //radious in m for lap beacon trigger
+const int bearing_buffer=25;
 
 boolean log_en;
 int newlog, rate, can_speed, max_filesize, filesize, log_type, trig, intv;
