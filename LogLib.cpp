@@ -263,7 +263,7 @@ void printJSON(){
     Serial.print(" ");
     for (int i = 0; i < 7; i++){
         if (CAN[i].en)
-            Serial.print(CAN[i].id);
+            Serial.print(CAN[i].id,HEX);
         Serial.print(" ");
     };
     Serial.println();
@@ -286,7 +286,7 @@ void printJSON(){
             Serial.print(FLS[i].minSpeed, 7);
             Serial.print(" ");
             Serial.print(FLS[i].maxSpeed, 7);
-        Serial.print(" ");
+        Serial.println(" ");
     };
     Serial.println();
     
@@ -711,5 +711,4 @@ String null_add(int value){
      null = "";
   return null;
 }
-
 
