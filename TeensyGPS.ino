@@ -1,3 +1,4 @@
+
 #include "MatrixMath.h"
 //#include <SoftwareSerial.h>    //in case arduino board
 #include "BMsg838.h"
@@ -34,7 +35,12 @@ const String fixmodmask[]={"no fix", "2D", "3D", "3D+DGNSS"};
     int16_t f;
     uint8_t b[2];
   };
-  
+
+    union conv_short_u
+  {
+    uint16_t f;
+    uint8_t b[2];
+  };
 
 
 
@@ -54,26 +60,27 @@ KalmanFilter filter;
 KalmanFilterVA filterVA;
 
 union conv lat, lon, lat_fil, lon_fil;
-union conv_short alt, vel, alt_fil, vel_fil, course, dof_roll, dof_pitch, dof_yaw, pressure, acc_x, acc_y, acc_z, q1, q2, q3, q4;
+union conv_short alt, alt_fil, dof_roll, dof_pitch, acc_x, acc_y, acc_z, q1, q2, q3, q4;
+union conv_short_u dof_yaw, pressure, vel, vel_fil, course, lap_dist, stint_time;
 
 int led = 13;
 
 boolean led_on=1;
 boolean file_cutted=false;
 
-double t0,t1,dt=0;
+uint32_t t0,t1,dt,laptime=0;
 uint8_t sats,fix;
 
 boolean log_en;
 int newlog, rate, can_speed, max_filesize, filesize, log_type, trig, intv;
-float blat, blong, btime, btol, course_angle, trigv, min_val, max_val;
+float blat, blong, btime, btol, course_angle, trigv, min_val, max_val, stint_duration;
 String UTC_Time;
 
 struct DOF_DATA att;
 struct CAN_DATA CAN[7];
 struct FLS_DATA FLS[3];
 float ax, ay, az, gx, gy, gz, mx, my, mz; // variables to hold latest sensor data values 
-float heading, roll, pitch, yaw, temp, inclination; 
+float heading, roll, pitch, yaw, temp, inclination, lap_distance; 
 float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};    // vector to hold quaternion
 pt prev_gps;  //curr_gps removed, structs of points defined in loglib.h
 /////////////////////////////////////
@@ -91,8 +98,8 @@ typedef struct
 }  line;
 
 line beacons[3];
-int pin_beacon[3] = {26, 27, 28}; //26 27 28 for Bt board 33 32 31 for new board
-union conv_short lap_dist, lap_time;
+int pin_beacon[3] = {26, 27, 28}; //26 27 28 for New board 33 32 31 for Bt board
+
 //////////////////////////////////////
 
 const int bearing_buffer=10;
@@ -103,6 +110,7 @@ SimpleFIFO<float,bearing_buffer> Long_buffer;
 
 void setup()
 {
+  delay(5000);
   //intizialize the fifo buffer with garbage
   for (int i=0; i < bearing_buffer; i++)
   {
@@ -137,7 +145,7 @@ void setup()
        can_pos.id=CAN[0].id;
        Serial.println(CAN[0].id,HEX);
        can_pos.len = 8;
-       can_nav.id=CAN[1].id;
+       can_nav.id=CAN[1].id;      
        can_nav.len = 8;
        can_pos_fil.id=CAN[2].id;
        can_pos_fil.len = 8;
@@ -156,7 +164,7 @@ void setup()
   if (beacon_output==true)
     { 
       for (int i=0; i<3; i++){
-        pinMode(pin_beacon[i], OUTPUT);
+        pinMode(pin_beacon[i], OUTPUT); 
         if (FLS[i].en)
           beacons[i].p0_lat = FLS[i].lat_A;
           beacons[i].p0_lon = FLS[i].lon_A;
@@ -252,11 +260,29 @@ void loop()
     prev_gps.lat=Lat_buffer.dequeue();
     prev_gps.lon=Long_buffer.dequeue();              
     course.f = gps.course_to(gps.venus838data_raw.Latitude, gps.venus838data_raw.Longitude, prev_gps.lat, prev_gps.lon);   
+    //Calculate lap distance
+    
+    t1=millis();    
+    dt=t1-t0;
+    t0=t1;                
+    laptime = laptime + dt;  //laptime in milliseconds    
+    temp=dt;
+    temp=temp/1000;
+    
+    lap_distance=lap_distance+temp*gps.venus838data_raw.velocity;  //Lap distance in meters   
+    temp=temp/60;
+    stint_duration = stint_duration + temp;  //stint duration in minutes
+   
     sensor_9dof_read();   
+    
     if (beacon_output)
         check_beacon_dist();
+    
     if (can_speed)
-        can_send(); 
+    {
+        if (!log_output) LogATT_nosd();
+        can_send();
+    }    
     if (log_output){
         if((newlog==0)&&(filesize > (max_filesize*1048576))){ //file size more than max 
             Serial.println("File's size exceeds max size"); 
@@ -321,26 +347,39 @@ void check_beacon_dist(){
    float distance;
    boolean crossing_true;
    // pt curr_gps, prev_gps; //moved to global
+   //curr_gps.lat = gps.venus838data_filter.Latitude;
+   //curr_gps.lon = gps.venus838data_filter.Longitude;
    for (int i = 0; i < (sizeof(beacons))/(sizeof(beacons[0])); i++){
      if (FLS[i].en)
       {
        crossing_true = get_line_intersection (beacons[i].p0_lat, beacons[i].p0_lon, beacons[i].p1_lat, beacons[i].p1_lon, prev_gps.lat, prev_gps.lon, gps.venus838data_raw.Latitude, gps.venus838data_raw.Longitude);
        if (crossing_true && (beacon_timeout.check()==true)&&(gps.venus838data_raw.velocity>0))
         {
-          if ((gps.venus838data_raw.velocity>beacons[i].min_spd )&&(gps.venus838data_raw.velocity<beacons[i].min_spd))
+          if ((gps.venus838data_raw.velocity>beacons[i].min_spd )&&(gps.venus838data_raw.velocity<beacons[i].max_spd))
           {
          if (i==0)
            Serial.println("Finish line crossing");
          if (i==1)
-           Serial.println("Pit entry line crossing");
+         {
+               //Serial.println("Pit entry line crossing");
+               stint_time.f = 0;
+               stint_duration = 0;
+           }
+           //Serial.println("Pit entry line crossing");
          if (i==2)
-           Serial.println("Pit exit line crossing");
+            {
+               //Serial.println("Pit exit line crossing");
+               stint_time.f = 0;
+               stint_duration = 0;
+           }
+           
          if (file_time_cut.check()==true)
                Serial.println("Time Cut Trigger"); 
+               
          //Triggers digital outputs according to setup
          digitalWrite(pin_beacon[i],beacons[i].output_level); 
-         lap_dist.f = 0;
-         lap_time.f = 0;
+         lap_dist.f = 0;        
+         laptime=0;
          can_lap.buf[0] = i+1;               
          if (sd_datalog && log_output) {
              // if (file_time_cut.check()==true) dataFile.println("Time Trigger");
@@ -370,6 +409,8 @@ void check_beacon_dist(){
        digitalWrite(pin_beacon[2],!beacons[2].output_level);
        can_lap.buf[0]=0;
        }
+   //prev_gps.lat = curr_gps.lat;
+   //prev_gps.lon = curr_gps.lon;
 }
 
 boolean check_intervals(){
@@ -406,6 +447,28 @@ boolean check_constr(float value, float min, float max){
   if ((min < value)&&(value < max))
     return true;
   return false;
+}
+
+
+float det(float a, float b, float c, float d){
+  return a*d - b*c;
+}
+
+boolean between(double a, double b, double c){
+  return min(a,b) <= c + EPS && c <= max(a,b) + EPS;
+}
+
+void swap(double &a, double &b){
+  double temp;
+  temp = a;
+  a = b;
+  b = temp;
+}
+
+boolean intersect_line(double a, double b, double c, double d){
+   if (a > b) swap(a, b);
+   if (c > d) swap(c, d);
+   return max(a,c) <= min(b,d);
 }
 
 boolean get_line_intersection(float p0_x, float p0_y, float p1_x, float p1_y,float p2_x, float p2_y, float p3_x, float p3_y)
@@ -453,30 +516,33 @@ void can_send(){
                  led_on=!led_on;
                  digitalWrite(led,led_on);
               }
-  lat.f=(int32_t)(gps.venus838data_raw.Latitude*1E7); 
-  lat_fil.f=(int32_t)(gps.venus838data_filter.Latitude*1E7);
-  lon.f=(int32_t)(gps.venus838data_raw.Longitude*1E7);
-  lon_fil.f=(int32_t)(gps.venus838data_filter.Longitude*1E7);
-  alt.f=(int16_t)(gps.venus838data_raw.SealevelAltitude*10);
-  alt_fil.f=(int16_t)(gps.venus838data_filter.SealevelAltitude*10);
-  vel.f=(int16_t)(gps.venus838data_raw.velocity*10*3.6);
-  vel_fil.f=(int16_t)(gps.venus838data_filter.velocity*10*3.6);
-  course.f=(int16_t)(course_angle*100);
+  lat.f=gps.venus838data_raw.Latitude*1E7; 
+  lat_fil.f=gps.venus838data_filter.Latitude*1E7;
+  lon.f=gps.venus838data_raw.Longitude*1E7;
+  lon_fil.f=gps.venus838data_filter.Longitude*1E7;
+  alt.f=gps.venus838data_raw.SealevelAltitude*10;  
+  alt_fil.f=gps.venus838data_filter.SealevelAltitude*10;
+  vel.f=gps.venus838data_raw.velocity*100*3.6;
+  vel_fil.f=gps.venus838data_filter.velocity*100*3.6;
+  course.f=course_angle*100;
   sats=gps.venus838data_raw.NumSV;
   fix=gps.venus838data_raw.fixmode;
   fix=fix<<4;
-  lap_dist.f = (int16_t)(0*4);          //to do
-  dof_roll.f = (int16_t)att.roll;
-  dof_pitch.f = (int16_t)att.pitch;
-  dof_yaw.f = (int16_t)(att.yaw*10);
-  pressure.f = (int16_t)0;          //to do
-  acc_x.f = (int16_t)(att.acc_x*100);
-  acc_y.f = (int16_t)(att.acc_y*100);
-  acc_z.f = (int16_t)(att.acc_z*100);
-  q1.f = (int16_t)(att.quat1);
-  q2.f = (int16_t)(att.quat2);
-  q3.f = (int16_t)(att.quat3);
-  q4.f = (int16_t)(att.quat4);
+  lap_dist.f = lap_distance*2.5;       
+  dof_roll.f = att.roll*100;  
+  dof_pitch.f = att.pitch*100;  
+  dof_yaw.f = att.yaw*100;
+  pressure.f = 0;          //to do
+  acc_x.f = att.acc_x*100;
+  acc_y.f = att.acc_y*100;
+  acc_z.f = att.acc_z*100;
+  stint_time.f=stint_duration*100; //Stint duration in 1/100 of minutes, max 655 minutes of stint duration.
+  q1.f = att.quat1;
+  q2.f = att.quat2;
+  q3.f = att.quat3;
+  q4.f = att.quat4;
+
+  
   //raw data
   //1 frame
   can_pos.buf[0]=lat.b[3];
@@ -487,7 +553,7 @@ void can_send(){
   can_pos.buf[5]=lon.b[2];
   can_pos.buf[6]=lon.b[1];
   can_pos.buf[7]=lon.b[0];
-  //2 frame - filter data
+  //3 frame - filter data
   can_pos_fil.buf[0]=lat_fil.b[3];
   can_pos_fil.buf[1]=lat_fil.b[2];
   can_pos_fil.buf[2]=lat_fil.b[1];
@@ -496,13 +562,13 @@ void can_send(){
   can_pos_fil.buf[5]=lon_fil.b[2];
   can_pos_fil.buf[6]=lon_fil.b[1];
   can_pos_fil.buf[7]=lon_fil.b[0];
-  //3 frame
+  //2 frame
   can_nav.buf[0]=alt.b[1];
   can_nav.buf[1]=alt.b[0];
   can_nav.buf[2]=vel.b[1];
-  can_nav.buf[3]=vel.b[0];
+  can_nav.buf[3]=vel.b[0];  
   can_nav.buf[4]=course.b[1];
-  can_nav.buf[5]=course.b[0];
+  can_nav.buf[5]=course.b[0];  
   can_nav.buf[6]=checksums;
   can_nav.buf[7]=fix|sats; 
   //4 frame
@@ -510,11 +576,12 @@ void can_send(){
   can_nav_fil.buf[1]=alt_fil.b[0];
   can_nav_fil.buf[2]=vel_fil.b[1];
   can_nav_fil.buf[3]=vel_fil.b[0];
-  can_nav_fil.buf[4]=course.b[1];
-  can_nav_fil.buf[5]=course.b[0];
+  can_nav_fil.buf[4]=stint_time.b[1]; //changed to stint time
+  can_nav_fil.buf[5]=stint_time.b[0];
   can_nav_fil.buf[6]=lap_dist.b[1];
   can_nav_fil.buf[7]=lap_dist.b[0];  
-  //5 frame
+  //5 frame  
+  
   can_dof1.buf[0]=dof_roll.b[1];
   can_dof1.buf[1]=dof_roll.b[0];
   can_dof1.buf[2]=dof_pitch.b[1];
